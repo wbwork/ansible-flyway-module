@@ -34,29 +34,34 @@ options:
             - the password to connect with
         required: false
 
-extends_documentation_fragment:
-    - azure
-
 author:
-    - Your Name (@yourhandle)
+    - Wolfgang Bauer
 '''
 
 EXAMPLES = '''
-# Pass in a message
-- name: Test with a message
-  my_new_test_module:
-    name: hello world
+# Create baseline
+- name: baseline
+  flyway:
+    cmd: baseline
+    user: root
+    url: jdbc:mysql://localhost:3306/
+    schemas: sample-db
 
-# pass in a message and have changed true
-- name: Test with a message and changed output
-  my_new_test_module:
-    name: hello world
-    new: true
+# 
+- name: Retrieve executed migrations
+  flyway:
+    cmd: info
+    user: root
+    url: jdbc:mysql://localhost:3306/
+    schemas: sample-db
 
 # fail the module
-- name: Test failure of the module
-  my_new_test_module:
-    name: fail me
+- name: Execute migrations
+  flyway:
+    cmd: migrate
+    user: root
+    url: jdbc:mysql://localhost:3306/
+    schemas: sample-db
 '''
 
 RETURN = '''
@@ -72,9 +77,17 @@ def baseline(module, cmd, result):
 
   c, out, err = module.run_command(cmd)
   if c == 1:
-    module.fail_json(msg='Creating baseline failed', error=err)
-  result['changed'] = c == 0
-  result['message'] = out
+    if "as it already contains migrations" in err:
+      result['changed'] = False
+      result['message'] = "Database containing already migrations (without baseline)"
+    else:
+      module.fail_json(msg='Creating baseline failed', error=err)
+  else:
+    if "Skipping" in out:
+      result['changed'] = False
+    else:
+      result['changed'] = True
+    result['message'] = out
   return result
 
 
@@ -104,20 +117,18 @@ def info(module, cmd, result):
   return result
 
 def validate(module, cmd, result):
-  # show info as debug
-
   c, out, err = module.run_command(cmd)
   if c==1:
+    if "Detected resolved migration not applied to database" in err:
+      result["missed_migration"] = re.search("database: ([0-9]*\.[0-9]*)\\n",err).group(1)
     result["error"] = True
     result["error_msg"] = err
   else:
     result["error"] = False
-  # want to make any changes to the environment, just return the current
-  # state with no modifications
-  if module.check_mode:
-    return result
-
-  # in the event of a success
+    result["out"] = out
+    m = re.search("Successfully validated ([0-9]+) migrations",out)
+    if m:
+      result["migrations"] = m.group(1)
 
   return result
 
@@ -186,7 +197,8 @@ def run_module():
     module.params['user'], module.params['password'], module.params['url'])
   if 'locations' in module.params:
     options += (" -locations=%s") % (module.params['locations'])
-
+  if 'schemas' in module.params:
+    options += (" -schemas=%s") % (module.params['schemas'])
   cmd = ("%s %s %s") % (executable, options, module.params['cmd'])
   if module.params['cmd'] == 'baseline':
     result = baseline(module, cmd, result)
@@ -197,10 +209,8 @@ def run_module():
   if module.params['cmd'] == 'validate':
     result = validate(module, cmd, result)
     if result["error"]:
-      module.fail_json(msg='Validate failed', error=result["error_msg"])
+      module.fail_json(msg='Validate failed', error=result["error_msg"],missed_migration=result["missed_migration"])
 
-  # if the user is working wiful module execution, you will want to
-  # simple AnsibleModule.exit_json(), passing the key/value results
   module.exit_json(**result)
 
 
